@@ -16,9 +16,6 @@ let CurrentState = 3;
 let TargetState = 3;
 let lastTargetState = 3;
 let lastValidCurrentState = 3;
-var PRIVATE_KEY = ""
-var api_key_enc = PRIVATE_KEY.substring(0, 64);
-var api_iv_enc = PRIVATE_KEY.substring(64, 96);
 
 var alarmStatus = {
   "Armed Stay"        : 0,
@@ -66,8 +63,9 @@ function HoneywellTuxedoAccessory(log, config) {
   this.host = config.host;
   this.port = config.port || "";
 
-  this.api_key_enc = api_key_enc;
-  this.api_iv_enc = api_iv_enc;
+  this.mac = config.mac;
+  this.api_key_enc = config.private_key.substring(0, 64);
+  this.api_iv_enc = config.private_key.substring(64, 96);
 
   if (!config.alarmCode) {
     this.log("Alarm code is missing from config");
