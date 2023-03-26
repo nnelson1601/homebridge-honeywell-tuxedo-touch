@@ -1,11 +1,11 @@
 "use strict";
-var got = require("got");
-var CryptoJS = require("crypto-js");
-var HTMLParser = require("node-html-parser");
-var pollingtoevent = require("polling-to-event");
-var { CookieJar } = require("tough-cookie");
-const util = require("util");
-
+import got from "got";
+import CryptoJS from "crypto-js";
+import { parse } from "node-html-parser";
+import pollingtoevent from "polling-to-event";
+import { CookieJar } from "tough-cookie";
+import { inspect } from "util";
+ 
 let Service, Characteristic;
 
 var protocol = "https";
@@ -16,8 +16,9 @@ let CurrentState = 3;
 let TargetState = 3;
 let lastTargetState = 3;
 let lastValidCurrentState = 3;
-var api_key_enc;
-var api_iv_enc;
+var PRIVATE_KEY = ""
+var api_key_enc = PRIVATE_KEY.substring(0, 64);
+var api_iv_enc = PRIVATE_KEY.substring(64, 96);
 
 var alarmStatus = {
   "Armed Stay"        : 0,
@@ -41,7 +42,7 @@ var alarmStatus = {
   "Error"             : 5, // Tuxedo api can be tempramental at times, when the API call fails, we set the accessory to general fault.
 };
 
-module.exports = (homebridge) => {
+export default (homebridge) => {
   Service = homebridge.hap.Service;
   Characteristic = homebridge.hap.Characteristic;
   homebridge.registerAccessory(
@@ -64,6 +65,9 @@ function HoneywellTuxedoAccessory(log, config) {
 
   this.host = config.host;
   this.port = config.port || "";
+
+  this.api_key_enc = api_key_enc;
+  this.api_iv_enc = api_iv_enc;
 
   if (!config.alarmCode) {
     this.log("Alarm code is missing from config");
@@ -380,20 +384,25 @@ function getAlarmMode(callback) {
   var url = protocol + "://" + this.host;
   if (this.port != "") url += ":" + this.port;
   url += apibasepath + "/GetSecurityStatus";
-  var header = "MACID:Browser,Path:" + hPath + "/GetSecurityStatus";
+  var header = "MACID:" + this.mac + ",Path:" + hPath + "/GetSecurityStatus";
+  var data = encryptData.apply(this, [
+    "mac=" +
+      this.mac +
+      "&operation=get",
+  ]);
   if (this.debug)
     this.log(
       "[getAlarmMode] About to call with, url: " +
         url +
         " header: " +
         header +
-        " api_key_enc: " +
-        this.api_key_enc
+        " body: " +
+        data
     );
   callAPI_POST.apply(this, [
     url,
-    "",
-    0,
+    data,
+    data.length,
     CryptoJS.HmacSHA1(header, this.api_key_enc),
     callback,
   ]);
@@ -414,7 +423,7 @@ function armAlarm(mode, callback) {
   if (this.port != "") url += ":" + this.port;
   url += apibasepath + "/AdvancedSecurity/ArmWithCode"; //?param=" + encryptData(dataCnt);
 
-  var header = "MACID:Browser,Path:" + hPath + "/AdvancedSecurity/ArmWithCode";
+  var header = "MACID:" + this.mac + ",Path:" + hPath + "/AdvancedSecurity/ArmWithCode";
   if (this.debug)
     this.log(
       "[armAlarm] About to call API with, url:" +
@@ -449,7 +458,7 @@ function disarmAlarm(callback) {
   url += apibasepath + "/AdvancedSecurity/DisarmWithCode"; //?param=" + encryptData(dataCnt);
 
   var header =
-    "MACID:Browser,Path:" + hPath + "/AdvancedSecurity/DisarmWithCode";
+    "MACID:" + this.mac + ",Path:" + hPath + "/AdvancedSecurity/DisarmWithCode";
   if (this.debug)
     this.log(
       "[disarmAlarm] About to call API with, url:" +
@@ -482,7 +491,6 @@ function decryptData(data) {
     CryptoJS.enc.Hex.parse(this.api_key_enc),
     {
       iv: CryptoJS.enc.Hex.parse(this.api_iv_enc),
-      salt: "",
       mode: CryptoJS.mode.CBC,
       padding: CryptoJS.pad.Pkcs7,
     }
@@ -500,7 +508,6 @@ function encryptData(data) {
     CryptoJS.enc.Hex.parse(this.api_key_enc),
     {
       iv: CryptoJS.enc.Hex.parse(this.api_iv_enc),
-      salt: "",
       mode: CryptoJS.mode.CBC,
       padding: CryptoJS.pad.Pkcs7,
     }
@@ -513,7 +520,8 @@ function encryptData(data) {
 
 async function getAPIKeys() {
   // Create an API request with the cookie jar turned on
-  if (this.debug) this.log("[getAPIKeys] getAPIKeys called");
+  if (this.debug) this.log("[getAPIKeys] getAPIKeys called and immediately returned");
+  return
   try {
     var tuxApiUrl = protocol + "://" + this.host;
     if (this.port) tuxApiUrl += ":" + this.port;
@@ -534,22 +542,22 @@ async function getAPIKeys() {
 
     if (this.debug) this.log("About to call, URL: " + tuxApiUrl);
     if (this.debug)
-      this.log("Options: " + util.inspect(options, false, null, true));
+      this.log("Options: " + inspect(options, false, null, true));
 
     var response = await got(tuxApiUrl, options);
 
-    var root = HTMLParser.parse(response.body);
+    var root = parse(response.body);
     var readit = root.querySelector("#readit");
 
     if (readit) {
       this.api_key_enc = readit
         .getAttribute("value")
         .toString()
-        .substr(0, 64);
+        .substring(0, 64);
       this.api_iv_enc = readit
         .getAttribute("value")
         .toString()
-        .substr(64, 96);
+        .substring(64, 96);
 
       if (this.debug) this.log("[getAPIKeys] Successfully retrieved keys");
       this.init();
