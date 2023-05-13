@@ -1,8 +1,9 @@
 "use strict";
 import CryptoJS from "crypto-js";
 import pollingtoevent from "polling-to-event";
-import crypto from "crypto";
 import https from 'https'
+import axios from "axios";
+import crypto from 'crypto'
  
 let Service, Characteristic;
 
