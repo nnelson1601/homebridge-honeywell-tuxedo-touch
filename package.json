@@ -24,8 +24,10 @@
     "homebridge": ">=0.4.8"
   },
   "dependencies": {
+    "axios": "^1.4.0",
+    "crypto": "^1.0.1",
     "crypto-js": "^4.0.0",
-    "got": "^11.8.6",
+    "got": "^12.6.0",
     "node-html-parser": "^1.2.20",
     "polling-to-event": "^2.1.0",
     "tough-cookie": "^4.0.0",

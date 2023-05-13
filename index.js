@@ -1,14 +1,11 @@
 "use strict";
-import got from "got";
 import CryptoJS from "crypto-js";
-import { parse } from "node-html-parser";
 import pollingtoevent from "polling-to-event";
-import { CookieJar } from "tough-cookie";
-import { inspect } from "util";
+import crypto from "crypto";
+import https from 'https'
  
 let Service, Characteristic;
 
-var protocol = "https";
 var apibasepath = "/system_http_api/API_REV01";
 var hPath = "API_REV01";
 
@@ -60,6 +57,7 @@ function HoneywellTuxedoAccessory(log, config) {
   // extract name from config
   this.name = config.name || "Honeywell Tuxedo Security";
 
+  this.protocol = config.protocol || "https";
   this.host = config.host;
   this.port = config.port || "";
 
@@ -71,10 +69,6 @@ function HoneywellTuxedoAccessory(log, config) {
     this.log("Alarm code is missing from config");
   }
   this.uCode = config.alarmCode;
-
-  (async () => {
-    await getAPIKeys.call(this);
-  })();
 
   // create a new Security System service
   this.SecuritySystem = new Service.SecuritySystem(this.name);
@@ -165,16 +159,6 @@ HoneywellTuxedoAccessory.prototype = {
         });
       });
     }
-    // Fetch API keys every 5 mins 
-    // This is to work around a bug in many Tuxedo units which periodically starts returning the wrong status
-    // until some page is fecthed in a browser, fetching keys again loads tuxedoapi.html which has the same affect
-    function tuxedoApiStateHack() {
-      if(this.debug) this.log("[tuxedoApiStateHack] Re-fetching API keys");
-      (async () => {
-        getAPIKeys.bind(this);
-      })();
-    }
-    setInterval(tuxedoApiStateHack,300000);
   },
   getServices: function () {
     if (this.debug) this.log("Get Services called");
@@ -306,68 +290,42 @@ HoneywellTuxedoAccessory.prototype = {
 };
 
 async function callAPI_POST(url, data, paramlength, headers, callback) {
-  const gotCookieJar = new CookieJar();
-  //const setCookie = promisify(cookieJar.setCookie.bind(cookieJar));
-
   const options = {
-    method: "POST",
     url: url,
+    method: "post",
     headers: {
       authtoken: headers,
       identity: this.api_iv_enc,
       "Content-Type": "application/x-www-form-urlencoded",
     },
-    body: "param=" + data + "&len=" + paramlength + "&tstamp=" + Math.random(),
-    cookieJar: gotCookieJar,
-    https: {
+    data: "param=" + data + "&len=" + paramlength + "&tstamp=" + Math.random(),
+    httpsAgent: new https.Agent({
       rejectUnauthorized: false,
-    },
+      secureOptions: crypto.constants.SSL_OP_LEGACY_SERVER_CONNECT
+    })
   };
   if (this.debug)
     this.log(
-      "[callAPI_POST]: Calling alarm API with url: " +
-        options.url +
-        " headers - authtoken: " +
-        options.headers["authtoken"] +
-        " headers-identity" +
-        options.headers["identity"] +
-        " body: " +
-        options.body
+      "[callAPI_POST]: Calling alarm API with url:" +
+      options.url +
+      "\nheaders - authtoken: " +
+      options.headers["authtoken"] +
+      " headers-identity: " +
+      options.headers["identity"] +
+      "\nbody: " +
+      options.data
     );
 
   try {
-    var response = await got.post(options);
-    var respFinal;
-    var respJSON = JSON.parse(response.body);
-    try {
-      respFinal = respJSON["Result"];
-    } catch (e) {
-      try {
-        respFinal = respJSON.Result;
-      } catch (e) {
-        respFinal = respJSON.toString();
-      }
-    }
+    var response = await axios(options);
+    var respFinal = response?.data?.Result
     // At this point, we have the result, so any callbacks can be executed
     if (this.debug) this.log("[callAPI_POST] Trying to decrypt response: " + respFinal);
     var decryptedData = decryptData.apply(this, [respFinal]);
-    //if (this.debug) this.log("[callAPI_POST] Response final decrypted: " + decryptedData);
 
-
-    var statusString = JSON.parse(decryptedData).Status.toString().trim();
-    /* Tuxedo has an annoying bug, sometimes the unit disconnects from the router and upon reconnecting, the GET API call continuously returns a "Not available" status.
-     * This seems to fix itself when the homepage tuxedoapi.html is loaded on any browser
-     * hence as a hack, if we receive a Not available state, we will try to fetch api keys again which loads the tuxedoapi.html programmatically to resolve the issue
-     */
-    if(statusString == "Not available") {
-        this.log("[callAPI_POST] Received response 'Not available', applying tuxedo bug workaround, fetching api keys again, if successful this should resolve the problem in the next call");
-        (async () => {
-          await getAPIKeys.call(this);
-        })();
-    }
-    // return data 
+    // return data
     callback(decryptedData);
-    
+
   } catch (error) {
     if (this.debug) {
       this.log("[callAPI_POST] Error:", error);
@@ -379,7 +337,7 @@ async function callAPI_POST(url, data, paramlength, headers, callback) {
 }
 
 function getAlarmMode(callback) {
-  var url = protocol + "://" + this.host;
+  var url = this.protocol + "://" + this.host;
   if (this.port != "") url += ":" + this.port;
   url += apibasepath + "/GetSecurityStatus";
   var header = "MACID:" + this.mac + ",Path:" + hPath + "/GetSecurityStatus";
@@ -417,7 +375,7 @@ function armAlarm(mode, callback) {
       parseInt(this.uCode) +
       "&operation=set",
   ]);
-  var url = protocol + "://" + this.host;
+  var url = this.protocol + "://" + this.host;
   if (this.port != "") url += ":" + this.port;
   url += apibasepath + "/AdvancedSecurity/ArmWithCode"; //?param=" + encryptData(dataCnt);
 
@@ -451,7 +409,7 @@ function disarmAlarm(callback) {
   var dataCnt = encryptData.apply(this, [
     "pID=" + pID + "&ucode=" + parseInt(this.uCode) + "&operation=set",
   ]);
-  var url = protocol + "://" + this.host;
+  var url = this.protocol + "://" + this.host;
   if (this.port != "") url += ":" + this.port;
   url += apibasepath + "/AdvancedSecurity/DisarmWithCode"; //?param=" + encryptData(dataCnt);
 
@@ -511,83 +469,4 @@ function encryptData(data) {
     }
   );
   return encodeURIComponent(encString);
-}
-
-// Get API Keys from the tuxedo unit
-// Create an API request with the cookie jar turned on
-
-async function getAPIKeys() {
-  // Create an API request with the cookie jar turned on
-  if (this.debug) this.log("[getAPIKeys] getAPIKeys called and immediately returned");
-  return
-  try {
-    var tuxApiUrl = protocol + "://" + this.host;
-    if (this.port) tuxApiUrl += ":" + this.port;
-    tuxApiUrl += "/tuxedoapi.html";
-
-    const gotCookieJar = new CookieJar();
-
-    const options = {
-      method: "GET",
-      headers: {
-        "User-Agent": "homebridge",
-      },
-      cookieJar: gotCookieJar,
-      https: {
-        rejectUnauthorized: false,
-      },
-    };
-
-    if (this.debug) this.log("About to call, URL: " + tuxApiUrl);
-    if (this.debug)
-      this.log("Options: " + inspect(options, false, null, true));
-
-    var response = await got(tuxApiUrl, options);
-
-    var root = parse(response.body);
-    var readit = root.querySelector("#readit");
-
-    if (readit) {
-      this.api_key_enc = readit
-        .getAttribute("value")
-        .toString()
-        .substring(0, 64);
-      this.api_iv_enc = readit
-        .getAttribute("value")
-        .toString()
-        .substring(64, 96);
-
-      if (this.debug) this.log("[getAPIKeys] Successfully retrieved keys");
-      this.init();
-    } else {
-      if (
-        root.querySelector("h1").structuredText ==
-        "Max Number Of Connections In Use.Please Try Again."
-      ) {
-        this.log(
-          "[getAPIKeys] Max tuxedo connections exceeded. Will retry in 3 mins."
-        );
-        
-        setTimeout(() => {
-          (async () => {
-            await getAPIKeys.call(this);
-          })();
-        }, 180000);
-      }
-    }
-  } catch (error) {
-    if (error.code == "EPROTO") {
-      this.log(
-        "[getAPIKeys] This likely an issue with strict openSSL configuration, see: https://github.com/lockpicker/homebridge-honeywell-tuxedo-touch/issues/1"
-      );
-    } else {
-      this.log("[getAPIKeys] Error retrieving keys from the tuxedo unit. Please ensure 'Authentication for web server local access' is disabled on the tuxedo unit. Will retry in 3 mins.");
-
-      if (this.debug) this.log(error);
-    }
-    // On error, retry in some time
-    setTimeout(() => {
-      getAPIKeys.call(this);
-    }, 180000);
-  }
 }
