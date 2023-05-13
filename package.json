@@ -25,7 +25,7 @@
   },
   "dependencies": {
     "crypto-js": "^4.0.0",
-    "got": "^11.5.2",
+    "got": "^11.8.6",
     "node-html-parser": "^1.2.20",
     "polling-to-event": "^2.1.0",
     "tough-cookie": "^4.0.0",
@@ -37,5 +37,6 @@
   },
   "watch": {
     "nodemon": "*.js"
-  }
+  },
+  "type": "module"
 }
