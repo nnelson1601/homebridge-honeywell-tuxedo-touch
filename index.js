@@ -1,40 +1,38 @@
 "use strict";
+
 import CryptoJS from "crypto-js";
 import pollingtoevent from "polling-to-event";
-import https from 'https'
+import https from "https";
 import axios from "axios";
-import crypto from 'crypto'
- 
+import crypto from "crypto";
+
 let Service, Characteristic;
 
 var apibasepath = "/system_http_api/API_REV01";
 var hPath = "API_REV01";
-
 let CurrentState = 3;
 let TargetState = 3;
-let lastTargetState = 3;
-let lastValidCurrentState = 3;
 
 var alarmStatus = {
-  "Armed Stay"        : 0,
-  "Armed Stay Fault"  : 0,
-  "Armed Away"        : 1,
-  "Armed Away Fault"  : 1,
-  "Armed Night"       : 2,
-  "Armed Instant"     : 2,
-  "Armed Instant Fault": 2, 
-  "Armed Night Fault" : 2,
-  "Ready Fault"       : 3,
-  "Ready To Arm"      : 3,
-  "Not Ready"         : 3,
-  "Not Ready Fault"   : 3,
+  "Armed Stay": 0,
+  "Armed Stay Fault": 0,
+  "Armed Away": 1,
+  "Armed Away Fault": 1,
+  "Armed Night": 2,
+  "Armed Instant": 2,
+  "Armed Instant Fault": 2,
+  "Armed Night Fault": 2,
+  "Ready Fault": 3,
+  "Ready To Arm": 3,
+  "Not Ready": 3,
+  "Not Ready Fault": 3,
   "Entry Delay Active": 4,
-  "Not Ready Alarm"   : 4,
-  "Armed Stay Alarm"  : 4,
-  "Armed Night Alarm" : 4,
-  "Armed Away Alarm"  : 4,
-  "Not available"     : 5, // At certain times, tuxedo API returns a Not available value with a successful API response, not sure why this is, set accessory to general fault when this happens
-  "Error"             : 5, // Tuxedo api can be tempramental at times, when the API call fails, we set the accessory to general fault.
+  "Not Ready Alarm": 4,
+  "Armed Stay Alarm": 4,
+  "Armed Night Alarm": 4,
+  "Armed Away Alarm": 4,
+  "Not available": 5, // At certain times, tuxedo API returns a Not available value with a successful API response, set accessory to general fault when this happens
+  "Error": 5, // Tuxedo api can be temperamental at times, when the API call fails, we set the accessory to general fault.
 };
 
 export default (homebridge) => {
@@ -51,9 +49,12 @@ function HoneywellTuxedoAccessory(log, config) {
   this.log = log;
   this.config = config;
   this.debug = config.debug || false;
-  this.fetchKeysBeforeEverySetCall = config.fetchKeysBeforeEverySetCall || false;
   this.polling = config.polling || false;
   this.pollInterval = config.pollInterval || 30000;
+
+  // Initialize instance state defaults
+  this.lastTargetState = 3;
+  this.lastValidCurrentState = 3;
 
   // extract name from config
   this.name = config.name || "Honeywell Tuxedo Security";
@@ -71,6 +72,13 @@ function HoneywellTuxedoAccessory(log, config) {
   }
   this.uCode = config.alarmCode;
 
+  // Reuse a single HTTPS agent with legacy TLS/DH support for Tuxedo Touch
+  this.httpsAgent = new https.Agent({
+    rejectUnauthorized: false,
+    ciphers: "DEFAULT@SECLEVEL=0",
+    secureOptions: crypto.constants.SSL_OP_LEGACY_SERVER_CONNECT,
+  });
+
   // create a new Security System service
   this.SecuritySystem = new Service.SecuritySystem(this.name);
 
@@ -86,11 +94,14 @@ function HoneywellTuxedoAccessory(log, config) {
     .on("set", this.handleSecuritySystemTargetStateSet.bind(this));
 
   if (this.debug) this.log("Service creation complete");
+
+  // Start polling if enabled in config
+  this.init();
 }
 
 HoneywellTuxedoAccessory.prototype = {
   /**
-   * Init method for regular polling of device state, fired after the api keys have been retrieved
+   * Init method for regular polling of device state
    */
   init: function () {
     var self = this;
@@ -99,7 +110,6 @@ HoneywellTuxedoAccessory.prototype = {
     if (self.debug) self.log("[init] Polling is set to : " + self.polling);
     if (self.polling) {
       self.log("Starting polling with an interval of %s ms", self.pollInterval);
-
       var emitterConfig = [
         {
           method: self.handleSecuritySystemCurrentStateGet.bind(this),
@@ -124,65 +134,82 @@ HoneywellTuxedoAccessory.prototype = {
         );
 
         emitter.on("longpoll", function (state) {
-          if(state != 5){
-              self.log(
+          if (state != 5) {
+            self.log(
               "Polling noticed %s change to %s, notifying devices",
               config.property,
               state
-              );
+            );
             if (config.property === "target state") {
-              if(state == 4){
+              if (state == 4) {
                 // Homekit doesn't accept a triggered value for target state, hence set the targetstate to last known target state
-                if(self.debug) self.log("Received target state 4, setting target state to lastTargetState: " + self.lastTargetState);
-                  self.SecuritySystem.getCharacteristic(config.characteristic).setValue(self.lastTargetState);
-                }else{
-                  self.lastTargetState = state;  
-                  self.SecuritySystem.getCharacteristic(config.characteristic).setValue(state);
-                }
+                if (self.debug)
+                  self.log(
+                    "Received target state 4, setting target state to lastTargetState: " +
+                      self.lastTargetState
+                  );
+                self.SecuritySystem.getCharacteristic(
+                  config.characteristic
+                ).setValue(self.lastTargetState);
+              } else {
+                self.lastTargetState = state;
+                self.SecuritySystem.getCharacteristic(
+                  config.characteristic
+                ).setValue(state);
+              }
             } else {
-              self.SecuritySystem.getCharacteristic(config.characteristic).setValue(state);
+              self.SecuritySystem.getCharacteristic(
+                config.characteristic
+              ).setValue(state);
             }
+
             // Set Statusfault characteristic to no fault
-            self.SecuritySystem.getCharacteristic(Characteristic.StatusFault).setValue(0)
+            self.SecuritySystem.getCharacteristic(
+              Characteristic.StatusFault
+            ).setValue(0);
           } else {
-            // When state is 5, an error has been encountered, most common causes are unit not reachable due to internet issues or returning state as not available
-            // Set Statusfault characteristic to General Fault
-            self.SecuritySystem.getCharacteristic(Characteristic.StatusFault).setValue(1)
-            self.log("Security system state unavailable, setting state to fault")
+            // When state is 5, an error has been encountered
+            self.SecuritySystem.getCharacteristic(
+              Characteristic.StatusFault
+            ).setValue(1);
+            self.log("Security system state unavailable, setting state to fault");
           }
-        }
-          );
+        });
 
         emitter.on("error", function (err) {
           self.log("Polling of %s failed, error was %s", config.property, err);
           // Set Statusfault characteristic to General Fault
-          this.SecuritySystem.getCharacteristic(Characteristic.StatusFault).setValue(1)
+          self.SecuritySystem.getCharacteristic(
+            Characteristic.StatusFault
+          ).setValue(1);
         });
       });
     }
   },
+
   getServices: function () {
     if (this.debug) this.log("Get Services called");
     if (!this.SecuritySystem) return [];
-
     const infoService = new Service.AccessoryInformation();
     infoService.setCharacteristic(
       Characteristic.Manufacturer,
       "Honeywell-Tuxedo"
     );
-
     return [infoService, this.SecuritySystem];
   },
+
   /**
    * Handle requests to get the current value of the "Security System Current State" characteristic
    */
   handleSecuritySystemCurrentStateGet: function (callback) {
-    if (this.debug) this.log("[handleSecuritySystemCurrentStateGet] Triggered GET SecuritySystemCurrentState");
-
+    if (this.debug)
+      this.log(
+        "[handleSecuritySystemCurrentStateGet] Triggered GET SecuritySystemCurrentState"
+      );
     getAlarmMode.apply(this, [returnCurrentState.bind(this)]);
 
     function returnCurrentState(value) {
-      var statusString = JSON.parse(value).Status.toString().trim();
+      var statusString = parseStatusString(value, this.log);
       if (this.debug)
         this.log(
           "[returnCurrentState] Retrieved status string: " +
@@ -191,16 +218,20 @@ HoneywellTuxedoAccessory.prototype = {
             alarmStatus[statusString]
         );
       CurrentState =
-        alarmStatus[statusString] === undefined ? 3 : alarmStatus[statusString];
-      
-        // If we find a state that isn't defined in alarm status and it isn't a arming / delay state, report in the log
-        if ((alarmStatus[statusString] === undefined) && (statusString.indexOf("Secs Remaining") == -1)) {
-          this.log(
-            "[handleSecuritySystemCurrentStateGet] Unknown alarm state: " +
-              statusString +
-              " please report this through a github issue to the developer"
-          );
-        }
+        alarmStatus[statusString] === undefined
+          ? 3
+          : alarmStatus[statusString];
+
+      if (
+        alarmStatus[statusString] === undefined &&
+        statusString.indexOf("Secs Remaining") == -1
+      ) {
+        this.log(
+          "[handleSecuritySystemCurrentStateGet] Unknown alarm state: " +
+            statusString +
+            " please report this through a github issue to the developer"
+        );
+      }
 
       if (this.debug)
         this.log(
@@ -209,12 +240,18 @@ HoneywellTuxedoAccessory.prototype = {
             ", corresponding current state: " +
             CurrentState
         );
-      if (CurrentState != 5){
+
+      if (CurrentState != 5) {
         this.lastValidCurrentState = CurrentState;
-      }else{
+      } else {
         CurrentState = this.lastValidCurrentState;
-        if(this.debug) this.log("[handleSecuritySystemCurrentStateGet] Current state was Not available / error, returning the last known good state: " + this.lastValidCurrentState);
+        if (this.debug)
+          this.log(
+            "[handleSecuritySystemCurrentStateGet] Current state was Not available / error, returning the last known good state: " +
+              this.lastValidCurrentState
+          );
       }
+
       callback(null, CurrentState);
     }
   },
@@ -224,12 +261,10 @@ HoneywellTuxedoAccessory.prototype = {
    */
   handleSecuritySystemTargetStateGet: function (callback) {
     if (this.debug) this.log("Triggered GET SecuritySystemTargetState");
-
     getAlarmMode.apply(this, [returnTargetState.bind(this)]);
 
     function returnTargetState(value) {
-      var statusString = JSON.parse(value).Status.toString().trim();
-
+      var statusString = parseStatusString(value, this.log);
       if (statusString.indexOf("Secs Remaining") != -1) {
         TargetState = this.lastTargetState;
       } else {
@@ -237,14 +272,21 @@ HoneywellTuxedoAccessory.prototype = {
           alarmStatus[statusString] === undefined
             ? 3
             : alarmStatus[statusString];
-        // Homekit doesn't accept a targetState of 4 (triggered), when triggered, return lastTargetState
-        if((TargetState == 4) || (TargetState == 5)) TargetState = this.lastTargetState;
-        if(this.debug) this.log("[handleSecuritySystemTargetStateGet] Target state was: " + TargetState + " returning lastTargetState: " + this.lastTargetState); 
+
+        // Homekit doesn't accept a targetState of 4 (triggered) or 5 (error), return lastTargetState
+        if (TargetState == 4 || TargetState == 5) {
+          TargetState = this.lastTargetState;
+          if (this.debug)
+            this.log(
+              "[handleSecuritySystemTargetStateGet] Target state was 4/5, returning lastTargetState: " +
+                this.lastTargetState
+            );
+        }
       }
 
       if (
-        (alarmStatus[statusString] === undefined) && 
-        (statusString.indexOf("Secs Remaining") == -1)
+        alarmStatus[statusString] === undefined &&
+        statusString.indexOf("Secs Remaining") == -1
       ) {
         this.log(
           "[handleSecuritySystemTargetStateGet] Unknown alarm state: " +
@@ -260,7 +302,6 @@ HoneywellTuxedoAccessory.prototype = {
             ", corresponding target state: " +
             TargetState
         );
-
       callback(null, TargetState);
     }
   },
@@ -270,19 +311,16 @@ HoneywellTuxedoAccessory.prototype = {
    */
   handleSecuritySystemTargetStateSet: function (value, callback) {
     if (this.debug)
-      this.log("[handleSecuritySystemTargetStateGet] Triggered SET SecuritySystemTargetState:" + value);
-
-    if (this.fetchKeysBeforeEverySetCall){
-      if(this.debug) this.log("[handleSecuritySystemCurrentStateGet] fetchKeysBeforeEverySetCall config is true, fetching API keys again");
-      (async () => {
-        await getAPIKeys.bind(this);
-      })();
-    }
+      this.log(
+        "[handleSecuritySystemTargetStateSet] Triggered SET SecuritySystemTargetState:" +
+          value
+      );
 
     TargetState = value;
-    //Capture the last target state if it isn't disarmed
-    if(value != 3)
-    	this.lastTargetState = value;
+
+    // Capture the last target state if it isn't disarmed
+    if (value != 3) this.lastTargetState = value;
+
     if (value == 0) armAlarm.apply(this, ["STAY", callback]);
     if (value == 1) armAlarm.apply(this, ["AWAY", callback]);
     if (value == 2) armAlarm.apply(this, ["NIGHT", callback]);
@@ -290,50 +328,66 @@ HoneywellTuxedoAccessory.prototype = {
   },
 };
 
+function parseStatusString(value, log) {
+  try {
+    var parsed = JSON.parse(value);
+    if (parsed && parsed.Status !== undefined && parsed.Status !== null) {
+      return parsed.Status.toString().trim();
+    }
+  } catch (err) {
+    if (log) log("[parseStatusString] Failed to parse response JSON: " + err.message);
+  }
+  return "Error";
+}
+
 async function callAPI_POST(url, data, paramlength, headers, callback) {
   const options = {
     url: url,
     method: "post",
+    timeout: 5000,
     headers: {
       authtoken: headers,
       identity: this.api_iv_enc,
       "Content-Type": "application/x-www-form-urlencoded",
     },
     data: "param=" + data + "&len=" + paramlength + "&tstamp=" + Math.random(),
-    httpsAgent: new https.Agent({
-      rejectUnauthorized: false,
-      secureOptions: crypto.constants.SSL_OP_LEGACY_SERVER_CONNECT
-    })
+    httpsAgent: this.httpsAgent,
   };
+
   if (this.debug)
     this.log(
       "[callAPI_POST]: Calling alarm API with url:" +
-      options.url +
-      "\nheaders - authtoken: " +
-      options.headers["authtoken"] +
-      " headers-identity: " +
-      options.headers["identity"] +
-      "\nbody: " +
-      options.data
+        options.url +
+        "\nheaders - authtoken: " +
+        options.headers["authtoken"] +
+        " headers-identity: " +
+        options.headers["identity"] +
+        "\nbody: " +
+        options.data
     );
 
   try {
     var response = await axios(options);
-    var respFinal = response?.data?.Result
-    // At this point, we have the result, so any callbacks can be executed
-    if (this.debug) this.log("[callAPI_POST] Trying to decrypt response: " + respFinal);
+    var respFinal = response?.data?.Result;
+
+    if (!respFinal) {
+      this.log("[callAPI_POST] Empty or missing Result field in API response");
+      callback('{"Status":"Error"}');
+      return;
+    }
+
+    if (this.debug)
+      this.log("[callAPI_POST] Trying to decrypt response: " + respFinal);
     var decryptedData = decryptData.apply(this, [respFinal]);
-
-    // return data
     callback(decryptedData);
-
   } catch (error) {
     if (this.debug) {
       this.log("[callAPI_POST] Error:", error);
     } else {
-      this.log("[callAPI_POST] Error:" + error.message);
-      callback('{"Status":"Error"}'); //Return an error state, this is mapped to an invalid state 5 in the alarmStatus dict
+      this.log("[callAPI_POST] Error: " + error.message);
     }
+    // Always invoke callback so Homebridge never hangs waiting for a response
+    callback('{"Status":"Error"}');
   }
 }
 
@@ -342,11 +396,7 @@ function getAlarmMode(callback) {
   if (this.port != "") url += ":" + this.port;
   url += apibasepath + "/GetSecurityStatus";
   var header = "MACID:" + this.mac + ",Path:" + hPath + "/GetSecurityStatus";
-  var data = encryptData.apply(this, [
-    "mac=" +
-      this.mac +
-      "&operation=get",
-  ]);
+  var data = encryptData.apply(this, ["mac=" + this.mac + "&operation=get"]);
   if (this.debug)
     this.log(
       "[getAlarmMode] About to call with, url: " +
@@ -378,9 +428,9 @@ function armAlarm(mode, callback) {
   ]);
   var url = this.protocol + "://" + this.host;
   if (this.port != "") url += ":" + this.port;
-  url += apibasepath + "/AdvancedSecurity/ArmWithCode"; //?param=" + encryptData(dataCnt);
-
-  var header = "MACID:" + this.mac + ",Path:" + hPath + "/AdvancedSecurity/ArmWithCode";
+  url += apibasepath + "/AdvancedSecurity/ArmWithCode";
+  var header =
+    "MACID:" + this.mac + ",Path:" + hPath + "/AdvancedSecurity/ArmWithCode";
   if (this.debug)
     this.log(
       "[armAlarm] About to call API with, url:" +
@@ -412,8 +462,7 @@ function disarmAlarm(callback) {
   ]);
   var url = this.protocol + "://" + this.host;
   if (this.port != "") url += ":" + this.port;
-  url += apibasepath + "/AdvancedSecurity/DisarmWithCode"; //?param=" + encryptData(dataCnt);
-
+  url += apibasepath + "/AdvancedSecurity/DisarmWithCode";
   var header =
     "MACID:" + this.mac + ",Path:" + hPath + "/AdvancedSecurity/DisarmWithCode";
   if (this.debug)
@@ -435,7 +484,7 @@ function disarmAlarm(callback) {
     finishDisarming,
   ]);
 
-  function finishDisarming(value) {
+  function finishDisarming() {
     callback(null);
   }
 }
